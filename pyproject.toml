@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bacnet-readonly-console"
+version = "0.2.0"
+description = "Read-only BACnet/IP collector and operator-initiated discovery console"
+requires-python = ">=3.11"
+dependencies = ["bacpypes3==0.0.106", "PyYAML==6.0.3"]
+
+[project.optional-dependencies]
+test = ["pytest==8.3.5", "pytest-asyncio==0.25.3"]
+
+[project.scripts]
+bacnet-console = "bacnet_console.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.data-files]
+"share/bacnet-console/templates" = ["templates/dashboard.html"]
+"share/bacnet-console/static" = ["static/dashboard.css", "static/dashboard.js"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+pythonpath = ["src"]

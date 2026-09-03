@@ -1,0 +1,33 @@
+[Unit]
+Description=Read-only BACnet/IP collector and LAN console
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bacnetconsole
+Group=bacnetconsole
+WorkingDirectory=/opt/bacnet-console
+ExecStart=/opt/bacnet-console/.venv/bin/bacnet-console --config /etc/bacnet-console/config.yaml
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=20
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/etc/bacnet-console
+ReadWritePaths=/var/lib/bacnet-console
+RestrictAddressFamilies=AF_INET AF_UNIX AF_NETLINK
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

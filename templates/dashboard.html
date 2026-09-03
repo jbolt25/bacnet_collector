@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex,nofollow">
+  <title>BACnet read-only console</title>
+  <link rel="stylesheet" href="/static/dashboard.css">
+</head>
+<body>
+  <header>
+    <h1>BACnet read-only console</h1>
+    <span class="badge {{HEARTBEAT_CLASS}}">collector heartbeat {{HEARTBEAT}}</span>
+    <span class="badge">READ-ONLY MODE — BACnet writes disabled</span>
+  </header>
+  <p>Cycles: {{CYCLES}} · last completed {{LAST_CYCLE}}
+  {{COLLECTOR_ERROR}} · No BACnet controls or writes are available.</p>
+
+  <form id="scan-form" method="post" action="/api/rescan">
+    <input type="hidden" name="csrf_token" value="{{CSRF_TOKEN}}">
+    <button id="scan-action" type="submit">Run operator scan now</button>
+    <span class="muted">Sends read-only discovery and reads once.</span>
+  </form>
+  <p id="action-message" class="bad" role="alert"></p>
+
+  <div class="layout">
+    <main>
+      <section id="approved-devices"><h2>Approved devices and point health</h2>{{APPROVED_SECTIONS}}</section>
+      <section id="saved-scans"><h2>Saved scan results</h2><p class="muted">Scroll within each table to review large device and point lists.</p>{{SAVED_RESULTS}}</section>
+      <form method="post" action="/api/points.csv">
+        <input type="hidden" name="csrf_token" value="{{CSRF_TOKEN}}">
+        <button type="submit">Download saved scan points CSV</button>
+      </form>
+      <section id="scan-history"><h2>Scan history</h2>
+        <div class="table-scroll"><table><thead><tr><th>ID</th><th>Name</th><th>Started UTC</th><th>Requested by</th><th>Status</th><th>Devices</th><th>Points</th><th>Error</th><th>Action</th></tr></thead>
+        <tbody>{{HISTORY}}</tbody></table></div>
+      </section>
+      <section id="audit-log"><h2>Audit log</h2>
+        <div class="table-scroll"><table><thead><tr><th>Time UTC</th><th>Action</th><th>Actor</th><th>Detail</th></tr></thead>
+        <tbody>{{AUDIT}}</tbody></table></div>
+      </section>
+    </main>
+    <aside id="scan-live" class="live-panel">
+      <h2>Live scan</h2><p id="scan-state" role="status" aria-live="polite">Checking scan status…</p>
+      <div id="scan-results"><p class="muted">No scan running.</p></div>
+    </aside>
+  </div>
+  <script src="/static/dashboard.js" defer></script>
+  <p><a href="/api/status">JSON status</a></p>
+</body>
+</html>

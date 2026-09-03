@@ -1,0 +1,30 @@
+#!/bin/sh
+set -eu
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+last_name=""
+
+rfkill unblock bluetooth >/dev/null 2>&1 || true
+bluetoothctl power on >/dev/null
+bluetoothctl pairable off >/dev/null
+bluetoothctl discoverable-timeout 0 >/dev/null
+
+while :; do
+    current_ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i == "src") {print $(i+1); exit}}')"
+
+    if [ -z "$current_ip" ]; then
+        current_ip="$(ip -4 -o addr show scope global 2>/dev/null | awk '{split($4, address, "/"); print address[1]; exit}')"
+    fi
+
+    if [ -n "$current_ip" ]; then
+        beacon_name="BACnet-$current_ip"
+        if [ "$beacon_name" != "$last_name" ]; then
+            bluetoothctl system-alias "$beacon_name" >/dev/null
+            bluetoothctl discoverable on >/dev/null
+            logger -t bacnet-ip-beacon "Advertising $beacon_name"
+            last_name="$beacon_name"
+        fi
+    fi
+
+    sleep 20
+done

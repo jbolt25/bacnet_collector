@@ -1,0 +1,47 @@
+# Local example only. Replace values only after BAS-owner approval.
+network:
+  # Static address and prefix of the Pi's dedicated wired BAS/LAN interface.
+  # Resolve the active default-route private IPv4 interface at service startup.
+  bind: auto
+  request_timeout_seconds: 5
+  inter_request_delay_seconds: 0.25
+  # Maximum property references per batch (not objects); starts at 2 and ramps.
+  # Set to 1 for individual reads only. Failures trigger paced fallback/backoff.
+  read_multiple_batch_size: 20
+
+# Five minutes is a deliberately conservative building-trend default.
+# The validator refuses intervals shorter than 60 seconds.
+poll_interval_seconds: 300
+
+scan:
+  response_window_seconds: 5
+  # Hard stop for one operator scan; prevents an unresponsive site from running forever.
+  max_duration_seconds: 1800
+  max_devices: 50
+  max_objects_per_device: 200
+
+storage:
+  database: /var/lib/bacnet-console/console.sqlite3
+  retention_days: 90
+
+dashboard:
+  # Resolves to the same private host selected by network.bind.
+  host: auto
+  port: 8080
+  stale_after_seconds: 900
+
+# An empty list is valid for initial discovery-only commissioning.
+# Operator scans never automatically add devices or points to this allowlist.
+devices: []
+
+# Approved example (remove devices: [] before using):
+# devices:
+#   - name: Example air handler
+#     instance: 1001
+#     # Optional. If omitted, an operator scan must resolve the address.
+#     address: 192.168.50.41
+#     points:
+#       - name: Supply air temperature
+#         object: analog-input,1
+#         property: present-value
+#         units: °F

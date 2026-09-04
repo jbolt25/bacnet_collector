@@ -65,15 +65,38 @@ def test_dashboard_escapes_discovered_values(config_file: Path) -> None:
     config = load_config(config_file)
     store = Store(config.database_path)
     store.register_config(config.devices)
-    scan = store.start_scan("test")
+
+    # 1. Device name XSS
+    scan = store.start_scan("<img src=x onerror=alert('scan_name')>")
     store.scan_device(scan, 1001, "192.168.50.41", "<script>alert(1)</script>", None)
-    store.finish_scan(scan, 1, 0)
+
+    # 2. Point name/value XSS
+    store.scan_point(scan, 1001, "analog-input,1", "\"'><script>alert('point')</script>", "<iframe src=x>", 0, "F", None)
+
+    # 3. Error string XSS
+    store.scan_device(scan, 1002, "192.168.50.42", "Device 2", "<b onmouseover=alert(1)>error</b>")
+
+    store.finish_scan(scan, 2, 1)
+
     dashboard = Dashboard(store, "127.0.0.1", 0, config.stale_after_seconds, lambda _: True)
     dashboard.start()
     try:
         _, _, page = _request(dashboard.bound_port, "GET", "/")
+
+        # Check raw payloads aren't present
         assert b"<script>alert(1)</script>" not in page
-        assert b"&lt;script&gt;" in page
+        assert b"<img src=x onerror=alert('scan_name')>" not in page
+        assert b"\"'><script>alert('point')</script>" not in page
+        assert b"<iframe src=x>" not in page
+        assert b"<b onmouseover=alert(1)>error</b>" not in page
+
+        # Check escaped variations are present
+        assert b"&lt;script&gt;alert(1)&lt;/script&gt;" in page
+        assert b"&lt;img src=x onerror=alert(&#39;scan_name&#39;)&gt;" in page
+        assert b"&#34;&#39;&gt;&lt;script&gt;alert(&#39;point&#39;)&lt;/script&gt;" in page
+        assert b"&lt;iframe src=x&gt;" in page
+        assert b"&lt;b onmouseover=alert(1)&gt;error&lt;/b&gt;" in page
+
     finally:
         dashboard.close()
         store.close()
@@ -147,6 +170,48 @@ def test_csv_download_and_scan_rename_are_local_token_protected_actions(config_f
         assert b"READ-ONLY MODE" in page
         assert b"Morning survey" in page
         assert b"action='/api/scan/rename'" in page
+    finally:
+        dashboard.close()
+        store.close()
+
+from bacnet_console.config import DeviceConfig, PointConfig
+
+def test_dashboard_escapes_approved_values(config_file: Path) -> None:
+    config = load_config(config_file)
+    store = Store(config.database_path)
+
+    device = DeviceConfig(
+        instance=2001,
+        name="<script>alert('device')</script>",
+        address="192.168.1.1",
+        points=(
+            PointConfig(
+                object_id="analog-input,1",
+                name="<img src=x onerror=alert('point')>"
+            ),
+        )
+    )
+
+    store.register_config((device,))
+
+    # Store some fake point data
+    store.point_result(2001, "<img src=x onerror=alert('point')>", 72.0, "72.0 <script>")
+
+    dashboard = Dashboard(store, "127.0.0.1", 0, config.stale_after_seconds, lambda _: True)
+    dashboard.start()
+    try:
+        _, _, page = _request(dashboard.bound_port, "GET", "/")
+
+        # Check raw payloads aren't present
+        assert b"<script>alert('device')</script>" not in page
+        assert b"<img src=x onerror=alert('point')>" not in page
+        assert b"72.0 <script>" not in page
+
+        # Check escaped variations are present
+        assert b"&lt;script&gt;alert(&#39;device&#39;)&lt;/script&gt;" in page
+        assert b"&lt;img src=x onerror=alert(&#39;point&#39;)&gt;" in page
+        assert b"72.0 &lt;script&gt;" in page
+
     finally:
         dashboard.close()
         store.close()

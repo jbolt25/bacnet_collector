@@ -7,7 +7,7 @@ name = "bacnet-readonly-console"
 version = "0.2.0"
 description = "Read-only BACnet/IP collector and operator-initiated discovery console"
 requires-python = ">=3.11"
-dependencies = ["bacpypes3==0.0.106", "PyYAML==6.0.3"]
+dependencies = ["bacpypes3==0.0.106", "PyYAML==6.0.3", "Jinja2>=3.1.0"]
 
 [project.optional-dependencies]
 test = ["pytest==8.3.5", "pytest-asyncio==0.25.3"]

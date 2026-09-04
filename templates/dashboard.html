@@ -10,14 +10,14 @@
 <body>
   <header>
     <h1>BACnet read-only console</h1>
-    <span class="badge {{HEARTBEAT_CLASS}}">collector heartbeat {{HEARTBEAT}}</span>
+    <span class="badge {{ state.heartbeat_at | health(stale_seconds) }}">collector heartbeat <time datetime='{{ state.heartbeat_at or "never" }}' title='{{ state.heartbeat_at or "never" }}'>{{ state.heartbeat_at | time_compact }}</time></span>
     <span class="badge">READ-ONLY MODE — BACnet writes disabled</span>
   </header>
-  <p>Cycles: {{CYCLES}} · last completed {{LAST_CYCLE}}
-  {{COLLECTOR_ERROR}} · No BACnet controls or writes are available.</p>
+  <p>Cycles: {{ state.cycles_completed }} · last completed <time datetime='{{ state.last_cycle_finished_at or "never" }}' title='{{ state.last_cycle_finished_at or "never" }}'>{{ state.last_cycle_finished_at | time_compact }}</time>
+  {% if state.fatal_error %} · collector error: {{ state.fatal_error }}{% endif %} · No BACnet controls or writes are available.</p>
 
   <form id="scan-form" method="post" action="/api/rescan">
-    <input type="hidden" name="csrf_token" value="{{CSRF_TOKEN}}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <button id="scan-action" type="submit">Run operator scan now</button>
     <span class="muted">Sends read-only discovery and reads once.</span>
   </form>
@@ -25,19 +25,179 @@
 
   <div class="layout">
     <main>
-      <section id="approved-devices"><h2>Approved devices and point health</h2>{{APPROVED_SECTIONS}}</section>
-      <section id="saved-scans"><h2>Saved scan results</h2><p class="muted">Scroll within each table to review large device and point lists.</p>{{SAVED_RESULTS}}</section>
+      <section id="approved-devices"><h2>Approved devices and point health</h2>
+        {% if not approved_devices %}
+          <p class='muted'>No devices or points are approved yet. Operator scans can be used for commissioning.</p>
+        {% else %}
+          {% for device in approved_devices %}
+            {% set device_health = "bad" if device.last_error else device.last_seen_at | health(stale_seconds) %}
+            {% set device_label = "error" if device.last_error else "healthy" if device_health == "ok" else "not recently seen" %}
+            <article>
+              <h3>{{ device.name }} <small>device {{ device.instance }}</small></h3>
+              <p>{{ device.current_address or 'address unresolved' }} · last seen
+                <time datetime='{{ device.last_seen_at or "never" }}' title='{{ device.last_seen_at or "never" }}'>{{ device.last_seen_at | time_compact }}</time>
+                · <span class='{{ device_health }}'>{{ device_label }}</span>
+                {% if device.last_error %} · {{ device.last_error }}{% endif %}
+              </p>
+              {% if device.points %}
+                <div class='table-scroll' tabindex='0' role='region' aria-label='Approved points'>
+                  <table>
+                    <thead>
+                      <tr><th>Point</th><th>Object</th><th>Value</th><th>Health</th><th>Last success</th><th>Error</th><th>Action</th></tr>
+                    </thead>
+                    <tbody>
+                      {% for point in device.points %}
+                        {% set point_health = "bad" if point.last_error else point.last_success_at | health(stale_seconds) %}
+                        {% set point_label = "error" if point.last_error else "healthy" if point_health == "ok" else "stale" %}
+                        <tr>
+                          <td>{{ point.name }}</td>
+                          <td><code>{{ point.object_id }}</code></td>
+                          <td>{{ point.last_value_text or '—' }} {{ point.units or '' }}</td>
+                          <td class='{{ point_health }}'>{{ point_label }}</td>
+                          <td><time datetime='{{ point.last_success_at or "never" }}' title='{{ point.last_success_at or "never" }}'>{{ point.last_success_at | time_compact }}</time></td>
+                          <td>{{ point.last_error or '' }}</td>
+                          <td>
+                            <form method='post' action='/api/point/delete'>
+                              <input type='hidden' name='csrf_token' value='{{ csrf_token }}'>
+                              <input type='hidden' name='point_id' value='{{ point.id }}'>
+                              <button type='submit'>Delete</button>
+                            </form>
+                          </td>
+                        </tr>
+                      {% endfor %}
+                    </tbody>
+                  </table>
+                </div>
+              {% else %}
+                <p class='muted'>Device approved with no trend points.</p>
+              {% endif %}
+            </article>
+          {% endfor %}
+        {% endif %}
+      </section>
+
+      <section id="saved-scans"><h2>Saved scan results</h2><p class="muted">Scroll within each table to review large device and point lists.</p>
+        {% if not saved_scans %}
+          <p class="muted">No saved scans yet.</p>
+        {% else %}
+          {% for scan in saved_scans %}
+            <details {% if loop.index0 == 0 %}open{% endif %}>
+              <summary><strong>{{ scan.name or 'Unnamed scan' }}</strong> · {{ scan.status }} · {{ scan.device_count }} devices · {{ scan.point_count }} points</summary>
+              <p>Started <time datetime='{{ scan.started_at or "never" }}' title='{{ scan.started_at or "never" }}'>{{ scan.started_at | time_compact }}</time> UTC · requested by {{ scan.requested_by }}</p>
+              <p class='bad'>{{ scan.error or '' }}</p>
+
+              {% if not scan.devices %}
+                <p class='muted'>No completed scan results yet.</p>
+              {% else %}
+                {% for device in scan.devices %}
+                  <article>
+                    <h3>{{ device.object_name or 'Unnamed device' }} <small>device {{ device.instance }} · {{ device.address }}</small></h3>
+                    <p>{{ 'Approved' if device.approved else 'Discovered, not approved' }}
+                      {% if device.object_error %} · {{ device.object_error }}{% endif %}
+                    </p>
+                    <div class='table-scroll' tabindex='0' role='region' aria-label='Saved device points'>
+                      <table>
+                        <thead>
+                          <tr><th>Object</th><th>Name</th><th>Value</th><th>Status</th><th>Health</th><th>Action</th></tr>
+                        </thead>
+                        <tbody>
+                          {% for point in device.points %}
+                            {% set point_health = "bad" if point.read_error else "ok" %}
+                            <tr>
+                              <td><code>{{ point.object_id }}</code></td>
+                              <td>{{ point.object_name or '—' }}</td>
+                              <td>{{ point.value_text or '—' }} {{ point.units or '' }}</td>
+                              <td>{{ 'approved' if point.approved else 'discovered' }}</td>
+                              <td class='{{ point_health }}'>{{ point.read_error or 'readable' }}</td>
+                              <td>
+                                <form method='post' action='/api/scan-point/delete'>
+                                  <input type='hidden' name='csrf_token' value='{{ csrf_token }}'>
+                                  <input type='hidden' name='point_id' value='{{ point.id }}'>
+                                  <button type='submit' {% if scan.status == 'running' %}disabled title="Stop the scan before removing points"{% endif %}>Remove</button>
+                                </form>
+                              </td>
+                            </tr>
+                          {% endfor %}
+                        </tbody>
+                      </table>
+                    </div>
+                  </article>
+                {% endfor %}
+              {% endif %}
+            </details>
+          {% endfor %}
+        {% endif %}
+      </section>
+
       <form method="post" action="/api/points.csv">
-        <input type="hidden" name="csrf_token" value="{{CSRF_TOKEN}}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <button type="submit">Download saved scan points CSV</button>
       </form>
+
       <section id="scan-history"><h2>Scan history</h2>
-        <div class="table-scroll"><table><thead><tr><th>ID</th><th>Name</th><th>Started UTC</th><th>Requested by</th><th>Status</th><th>Devices</th><th>Points</th><th>Error</th><th>Action</th></tr></thead>
-        <tbody>{{HISTORY}}</tbody></table></div>
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr><th>ID</th><th>Name</th><th>Started UTC</th><th>Requested by</th><th>Status</th><th>Devices</th><th>Points</th><th>Error</th><th>Action</th></tr>
+            </thead>
+            <tbody>
+              {% if not scans %}
+                <tr><td colspan="9">No scans requested</td></tr>
+              {% else %}
+                {% for scan in scans %}
+                  <tr>
+                    <td>{{ scan.id }}</td>
+                    <td>
+                      <form method='post' action='/api/scan/rename'>
+                        <input type='hidden' name='csrf_token' value='{{ csrf_token }}'>
+                        <input type='hidden' name='scan_id' value='{{ scan.id }}'>
+                        <input name='name' maxlength='120' value='{{ scan.name or "Unnamed scan" }}' aria-label='Scan {{ scan.id }} name'>
+                        <button type='submit'>Rename</button>
+                      </form>
+                    </td>
+                    <td><time datetime='{{ scan.started_at or "never" }}' title='{{ scan.started_at or "never" }}'>{{ scan.started_at | time_compact }}</time></td>
+                    <td>{{ scan.requested_by }}</td>
+                    <td>{{ scan.status }}</td>
+                    <td>{{ scan.device_count }}</td>
+                    <td>{{ scan.point_count }}</td>
+                    <td>{{ scan.error or '' }}</td>
+                    <td>
+                      <form method='post' action='/api/scan/delete'>
+                        <input type='hidden' name='csrf_token' value='{{ csrf_token }}'>
+                        <input type='hidden' name='scan_id' value='{{ scan.id }}'>
+                        <button type='submit' {% if scan.status == 'running' %}disabled{% endif %}>Delete</button>
+                      </form>
+                    </td>
+                  </tr>
+                {% endfor %}
+              {% endif %}
+            </tbody>
+          </table>
+        </div>
       </section>
+
       <section id="audit-log"><h2>Audit log</h2>
-        <div class="table-scroll"><table><thead><tr><th>Time UTC</th><th>Action</th><th>Actor</th><th>Detail</th></tr></thead>
-        <tbody>{{AUDIT}}</tbody></table></div>
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr><th>Time UTC</th><th>Action</th><th>Actor</th><th>Detail</th></tr>
+            </thead>
+            <tbody>
+              {% if not audit_events %}
+                <tr><td colspan="4">No audit events</td></tr>
+              {% else %}
+                {% for event in audit_events %}
+                  <tr>
+                    <td><time datetime='{{ event.occurred_at or "never" }}' title='{{ event.occurred_at or "never" }}'>{{ event.occurred_at | time_compact }}</time></td>
+                    <td>{{ event.action }}</td>
+                    <td>{{ event.actor or 'system' }}</td>
+                    <td>{{ event.detail or '' }}</td>
+                  </tr>
+                {% endfor %}
+              {% endif %}
+            </tbody>
+          </table>
+        </div>
       </section>
     </main>
     <aside id="scan-live" class="live-panel">

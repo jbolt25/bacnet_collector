@@ -3,9 +3,10 @@ from __future__ import annotations
 import html
 import json
 import secrets
-import re
 import sys
 from datetime import datetime, timezone
+
+from jinja2 import Environment, FileSystemLoader, select_autoescape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Thread
@@ -25,82 +26,13 @@ def _health(value: str | None, stale_seconds: float) -> str:
     return "ok" if age <= stale_seconds else "warn"
 
 
-def _time_markup(value: str | None) -> str:
-    """Render compact UTC time while retaining the full value on hover."""
+def _time_compact(value: str | None) -> str:
+    """Format compact UTC time."""
     raw = value or "never"
     try:
-        compact = datetime.fromisoformat(raw).astimezone(timezone.utc).strftime("%m/%d %H:%M:%SZ")
+        return datetime.fromisoformat(raw).astimezone(timezone.utc).strftime("%m/%d %H:%M:%SZ")
     except (TypeError, ValueError):
-        compact = raw
-    return f"<time datetime='{html.escape(raw, quote=True)}' title='{html.escape(raw, quote=True)}'>{html.escape(compact)}</time>"
-
-
-def _approved_sections(devices: list[dict[str, Any]], stale_seconds: float, csrf_token: str) -> str:
-    if not devices:
-        return "<p class='muted'>No devices or points are approved yet. Operator scans can be used for commissioning.</p>"
-    blocks = []
-    for device in devices:
-        device_health = "bad" if device["last_error"] else _health(device["last_seen_at"], stale_seconds)
-        device_label = (
-            "error" if device["last_error"] else "healthy" if device_health == "ok" else "not recently seen"
-        )
-        rows = []
-        for point in device["points"]:
-            health = "bad" if point["last_error"] else _health(point["last_success_at"], stale_seconds)
-            label = "error" if point["last_error"] else "healthy" if health == "ok" else "stale"
-            rows.append(
-                "<tr>"
-                f"<td>{html.escape(point['name'])}</td><td><code>{html.escape(point['object_id'])}</code></td>"
-                f"<td>{html.escape(point['last_value_text'] or '—')} {html.escape(point['units'] or '')}</td>"
-                f"<td class='{health}'>{label}</td><td>{_time_markup(point['last_success_at'])}</td>"
-                f"<td>{html.escape(point['last_error'] or '')}</td>"
-                f"<td><form method='post' action='/api/point/delete'>"
-                f"<input type='hidden' name='csrf_token' value='{csrf_token}'>"
-                f"<input type='hidden' name='point_id' value='{point['id']}'>"
-                f"<button type='submit'>Delete</button></form></td></tr>"
-            )
-        blocks.append(
-            f"<article><h3>{html.escape(device['name'])} <small>device {device['instance']}</small></h3>"
-            f"<p>{html.escape(device['current_address'] or 'address unresolved')} · last seen "
-            f"{_time_markup(device['last_seen_at'])} · <span class='{device_health}'>{device_label}</span>"
-            f"{' · ' + html.escape(device['last_error']) if device['last_error'] else ''}</p>"
-            + ("<div class='table-scroll' tabindex='0' role='region' aria-label='Approved points'><table><thead><tr><th>Point</th><th>Object</th><th>Value</th><th>Health</th>"
-               "<th>Last success</th><th>Error</th><th>Action</th></tr></thead><tbody>" + "".join(rows) + "</tbody></table></div>"
-               if rows else "<p class='muted'>Device approved with no trend points.</p>")
-            + "</article>"
-        )
-    return "".join(blocks)
-
-
-def _scan_sections(devices: list[dict[str, Any]], csrf_token: str, running: bool = False) -> str:
-    disabled = 'disabled title="Stop the scan before removing points"' if running else ''
-    if not devices:
-        return "<p class='muted'>No completed scan results yet.</p>"
-    blocks = []
-    for device in devices:
-        rows = []
-        for point in device["points"]:
-            health = "bad" if point["read_error"] else "ok"
-            rows.append(
-                f"<tr><td><code>{html.escape(point['object_id'])}</code></td>"
-                f"<td>{html.escape(point['object_name'] or '—')}</td>"
-                f"<td>{html.escape(point['value_text'] or '—')} {html.escape(point['units'] or '')}</td>"
-                f"<td>{'approved' if point['approved'] else 'discovered'}</td>"
-                f"<td class='{health}'>{html.escape(point['read_error'] or 'readable')}</td>"
-                f"<td><form method='post' action='/api/scan-point/delete'>"
-                f"<input type='hidden' name='csrf_token' value='{csrf_token}'>"
-                f"<input type='hidden' name='point_id' value='{point['id']}'>"
-                f"<button type='submit' {disabled}>Remove</button></form></td></tr>"
-            )
-        blocks.append(
-            f"<article><h3>{html.escape(device['object_name'] or 'Unnamed device')} "
-            f"<small>device {device['instance']} · {html.escape(device['address'])}</small></h3>"
-            f"<p>{'Approved' if device['approved'] else 'Discovered, not approved'}"
-            f"{' · ' + html.escape(device['object_error']) if device['object_error'] else ''}</p>"
-            "<div class='table-scroll' tabindex='0' role='region' aria-label='Saved device points'><table><thead><tr><th>Object</th><th>Name</th><th>Value</th><th>Status</th><th>Health</th><th>Action</th>"
-            f"</tr></thead><tbody>{''.join(rows)}</tbody></table></div></article>"
-        )
-    return "".join(blocks)
+        return raw
 
 
 def _asset_root(assets_dir: str | Path | None) -> Path:
@@ -111,66 +43,37 @@ def _asset_root(assets_dir: str | Path | None) -> Path:
     return Path(sys.prefix) / "share/bacnet-console"
 
 
-def _read_asset(root: Path, relative: str) -> str:
-    path = (root / relative).resolve()
-    return path.read_text(encoding="utf-8")
+_env: Environment | None = None
 
+def get_jinja_env(assets_dir: Path) -> Environment:
+    global _env
+    if _env is None:
+        _env = Environment(
+            loader=FileSystemLoader(assets_dir / "templates"),
+            autoescape=select_autoescape(['html', 'xml'])
+        )
+        _env.filters['health'] = _health
+        _env.filters['time_compact'] = _time_compact
+    return _env
 
 def render_status(
     data: dict[str, Any], stale_seconds: float, csrf_token: str,
     script_nonce: str | None = None, assets_dir: str | Path | None = None,
 ) -> str:
     del script_nonce  # retained for compatibility; external scripts need no nonce
-    state = data["collector"]
-    heartbeat = _health(state["heartbeat_at"], stale_seconds)
-    history = "".join(
-        f"<tr><td>{scan['id']}</td><td>"
-        f"<form method='post' action='/api/scan/rename'>"
-        f"<input type='hidden' name='csrf_token' value='{csrf_token}'>"
-        f"<input type='hidden' name='scan_id' value='{scan['id']}'>"
-        f"<input name='name' maxlength='120' value='{html.escape(scan.get('name') or 'Unnamed scan', quote=True)}' "
-        f"aria-label='Scan {scan['id']} name'><button type='submit'>Rename</button></form></td>"
-        f"<td>{_time_markup(scan['started_at'])}</td>"
-        f"<td>{html.escape(scan['requested_by'])}</td><td>{scan['status']}</td>"
-        f"<td>{scan['device_count']}</td><td>{scan['point_count']}</td>"
-        f"<td>{html.escape(scan['error'] or '')}</td><td><form method='post' action='/api/scan/delete'>"
-        f"<input type='hidden' name='csrf_token' value='{csrf_token}'>"
-        f"<input type='hidden' name='scan_id' value='{scan['id']}'>"
-        f"<button type='submit' {'disabled' if scan['status'] == 'running' else ''}>Delete</button></form></td></tr>" for scan in data["scans"]
+    env = get_jinja_env(_asset_root(assets_dir))
+    template = env.get_template("dashboard.html")
+
+    return template.render(
+        data=data,
+        state=data["collector"],
+        csrf_token=csrf_token,
+        stale_seconds=stale_seconds,
+        scans=data.get("scans", []),
+        audit_events=data.get("audit_events", []),
+        saved_scans=data.get("saved_scans", []),
+        approved_devices=data.get("approved_devices", [])
     )
-    audit = "".join(
-        f"<tr><td>{_time_markup(event['occurred_at'])}</td><td>{html.escape(event['action'])}</td>"
-        f"<td>{html.escape(event['actor'] or 'system')}</td><td>{html.escape(event['detail'] or '')}</td></tr>"
-        for event in data.get("audit_events", [])
-    )
-    saved_results = "".join(
-        f"<details {'open' if index == 0 else ''}><summary><strong>{html.escape(scan.get('name') or 'Unnamed scan')}</strong> · "
-        f"{html.escape(scan['status'])} · {scan['device_count']} devices · {scan['point_count']} points</summary>"
-        f"<p>Started {_time_markup(scan['started_at'])} UTC · requested by {html.escape(scan['requested_by'])}</p>"
-        f"<p class='bad'>{html.escape(scan['error'] or '')}</p>"
-        f"{_scan_sections(scan['devices'], csrf_token, scan['status'] == 'running')}</details>"
-        for index, scan in enumerate(data.get("saved_scans", []))
-    )
-    template = _read_asset(_asset_root(assets_dir), "templates/dashboard.html")
-    replacements = {
-        "{{HEARTBEAT_CLASS}}": heartbeat,
-        "{{HEARTBEAT}}": _time_markup(state["heartbeat_at"]),
-        "{{CYCLES}}": str(state["cycles_completed"]),
-        "{{LAST_CYCLE}}": _time_markup(state["last_cycle_finished_at"]),
-        "{{COLLECTOR_ERROR}}": (
-            " · collector error: " + html.escape(state["fatal_error"])
-            if state["fatal_error"] else ""
-        ),
-        "{{CSRF_TOKEN}}": html.escape(csrf_token, quote=True),
-        "{{APPROVED_SECTIONS}}": _approved_sections(data["approved_devices"], stale_seconds, csrf_token),
-        "{{SAVED_RESULTS}}": saved_results or '<p class="muted">No saved scans yet.</p>',
-        "{{HISTORY}}": history or '<tr><td colspan="9">No scans requested</td></tr>',
-        "{{AUDIT}}": audit or '<tr><td colspan="4">No audit events</td></tr>',
-    }
-    if any(marker not in template for marker in replacements):
-        raise ValueError("dashboard template is missing a required placeholder")
-    # Substitute once: controller text containing template markers is data.
-    return re.sub(r"\{\{[A-Z_]+\}\}", lambda match: replacements.get(match[0], match[0]), template)
 
 
 class Dashboard:

@@ -251,10 +251,7 @@ class Dashboard:
                     ok = outer.store.rename_scan(
                         scan_id, form.get("name", [""])[0], actor=self.client_address[0]
                     )
-                    self._send(
-                        303 if ok else 400, "text/plain; charset=utf-8",
-                        b"" if ok else b"invalid\n", {"Location": "/"} if ok else None,
-                    )
+                    self._send_redirect_or_error(ok)
                     return
                 if path in ("/api/scan/delete", "/api/point/delete", "/api/scan-point/delete"):
                     field = "scan_id" if path == "/api/scan/delete" else "point_id"
@@ -268,30 +265,30 @@ class Dashboard:
                         ok = outer.store.delete_scan_point(item_id, actor=self.client_address[0])
                     else:
                         ok = outer.store.delete_point(item_id, actor=self.client_address[0])
-                    self._send(
-                        303 if ok else 400, "text/plain; charset=utf-8",
-                        b"" if ok else b"invalid\n", {"Location": "/"} if ok else None,
-                    )
+                    self._send_redirect_or_error(ok)
                     return
                 if path == "/api/rescan/cancel":
                     cancelled = outer.cancel_scan()
                     if cancelled and "application/json" in self.headers.get("Accept", ""):
                         self._send(200, "application/json", b'{"accepted":true}')
                         return
-                    self._send(
-                        303 if cancelled else 409, "text/plain; charset=utf-8",
-                        b"" if cancelled else b"no scan running\n",
-                        {"Location": "/"} if cancelled else None,
-                    )
+                    self._send_redirect_or_error(cancelled, 409, b"no scan running\n")
                     return
                 accepted = request_scan(self.client_address[0])
-                if accepted:
-                    if "application/json" in self.headers.get("Accept", ""):
-                        self._send(202, "application/json", b'{"accepted":true}')
-                    else:
-                        self._send(303, "text/plain; charset=utf-8", b"", {"Location": "/"})
+                if accepted and "application/json" in self.headers.get("Accept", ""):
+                    self._send(202, "application/json", b'{"accepted":true}')
                 else:
-                    self._send(409, "text/plain; charset=utf-8", b"scan already running\n")
+                    self._send_redirect_or_error(accepted, 409, b"scan already running\n")
+
+            def _send_redirect_or_error(
+                self, success: bool, error_status: int = 400, error_message: bytes = b"invalid\n"
+            ) -> None:
+                self._send(
+                    303 if success else error_status,
+                    "text/plain; charset=utf-8",
+                    b"" if success else error_message,
+                    {"Location": "/"} if success else None,
+                )
 
             def _deny(self) -> None:
                 self._send(405, "text/plain; charset=utf-8", b"read-only console\n", {"Allow": "GET"})

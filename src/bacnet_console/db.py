@@ -344,6 +344,23 @@ class Store:
             )
             return True
 
+    def enable_point(self, point_id: int, actor: str | None = None) -> bool:
+        with self._lock, self._db:
+            point = self._db.execute(
+                "SELECT device_instance,name FROM points WHERE id=?", (point_id,)
+            ).fetchone()
+            if point is None:
+                return False
+            self._db.execute("UPDATE points SET configured=1,disabled=0 WHERE id=?", (point_id,))
+            self._db.execute(
+                "INSERT INTO audit_events(occurred_at,action,actor,detail) VALUES(?,?,?,?)",
+                (
+                    utc_now(), "point_enabled", actor[:100] if actor else None,
+                    f"point {point['device_instance']}/{point['name']}",
+                ),
+            )
+            return True
+
     def delete_scan_point(self, point_id: int, actor: str | None = None) -> bool:
         with self._lock, self._db:
             row = self._db.execute(

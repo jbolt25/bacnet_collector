@@ -11,11 +11,20 @@ from .reads import ReadScheduler
 
 def _object_id(value: Any) -> str:
     if isinstance(value, (tuple, list)) and len(value) == 2:
-        return f"{value[0]},{int(value[1])}"
+        obj_type, instance = str(value[0]), int(value[1])
+        try:
+            from bacpypes3.primitivedata import ObjectIdentifier
+            return str(ObjectIdentifier((obj_type, instance)))
+        except (ImportError, ValueError):
+            return f"{obj_type},{instance}"
     text = str(value).replace(":", ",")
     if "," not in text:
         raise ValueError(f"invalid object identifier {text!r}")
-    return text
+    try:
+        from bacpypes3.primitivedata import ObjectIdentifier
+        return str(ObjectIdentifier(text))
+    except (ImportError, ValueError):
+        return text
 
 
 def _object_list(value: Any) -> list[str]:
@@ -108,8 +117,20 @@ class ScanManager:
         try:
             result = await self.reader.one(device.address, (device_id, "object-list"))
             if result.error:
-                raise ValueError(result.error)
-            objects = _object_list(result.value)
+                # Attempt indexed fallback for large object-lists or unsegmented controllers
+                count_res = await self.reader.one(device.address, (device_id, "object-list[0]"))
+                if not count_res.error and isinstance(count_res.value, int) and count_res.value > 0:
+                    indexed_objects = []
+                    limit = min(count_res.value, self.config.scan_max_objects_per_device)
+                    for idx in range(1, limit + 1):
+                        item_res = await self.reader.one(device.address, (device_id, f"object-list[{idx}]"))
+                        if not item_res.error and item_res.value:
+                            indexed_objects.append(_object_id(item_res.value))
+                    objects = indexed_objects
+                else:
+                    raise ValueError(result.error)
+            else:
+                objects = _object_list(result.value)
             if not objects:
                 raise ValueError("object-list returned no objects")
         except READ_ERRORS as exc:

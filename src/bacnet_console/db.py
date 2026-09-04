@@ -150,23 +150,32 @@ class Store:
         with self._lock, self._db:
             self._db.execute("UPDATE devices SET configured=0")
             self._db.execute("UPDATE points SET configured=0")
+
+            device_params = []
+            point_params = []
             for device in devices:
-                self._db.execute(
-                    """INSERT INTO devices(instance,name,configured,configured_address,current_address)
-                       VALUES(?,?,1,?,?) ON CONFLICT(instance) DO UPDATE SET
-                       name=excluded.name,configured=1,
-                       configured_address=excluded.configured_address,
-                       current_address=COALESCE(excluded.configured_address,devices.current_address)""",
-                    (device.instance, device.name, device.address, device.address),
-                )
+                device_params.append((device.instance, device.name, device.address, device.address))
                 for point in device.points:
-                    self._db.execute(
-                        """INSERT INTO points(device_instance,name,object_id,property_id,units,configured)
-                           VALUES(?,?,?,?,?,1) ON CONFLICT(device_instance,name) DO UPDATE SET
-                           object_id=excluded.object_id,property_id=excluded.property_id,
-                           units=excluded.units,configured=CASE WHEN points.disabled=0 THEN 1 ELSE 0 END""",
-                        (device.instance, point.name, point.object_id, point.property_id, point.units),
+                    point_params.append(
+                        (device.instance, point.name, point.object_id, point.property_id, point.units)
                     )
+
+            self._db.executemany(
+                """INSERT INTO devices(instance,name,configured,configured_address,current_address)
+                   VALUES(?,?,1,?,?) ON CONFLICT(instance) DO UPDATE SET
+                   name=excluded.name,configured=1,
+                   configured_address=excluded.configured_address,
+                   current_address=COALESCE(excluded.configured_address,devices.current_address)""",
+                device_params,
+            )
+
+            self._db.executemany(
+                """INSERT INTO points(device_instance,name,object_id,property_id,units,configured)
+                   VALUES(?,?,?,?,?,1) ON CONFLICT(device_instance,name) DO UPDATE SET
+                   object_id=excluded.object_id,property_id=excluded.property_id,
+                   units=excluded.units,configured=CASE WHEN points.disabled=0 THEN 1 ELSE 0 END""",
+                point_params,
+            )
 
     def start(self) -> None:
         now = utc_now()

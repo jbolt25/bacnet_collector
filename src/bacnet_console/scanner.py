@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from .bacnet import DiscoveredDevice, READ_ERRORS, ScanClient, serialise_value
+from .bacnet import DiscoveredDevice, READ_ERRORS, ReadResult, ScanClient, serialise_value
 from .config import ConsoleConfig
 from .db import Store
 from .reads import ReadScheduler
@@ -141,28 +141,64 @@ class ScanManager:
 
         count = 0
         objects = list(dict.fromkeys(obj for obj in objects if obj != device_id))
-        properties = ("object-name", "present-value", "units")
-        keys = [(obj, prop) for obj in objects[:self.config.scan_max_objects_per_device]
-                for prop in properties]
+
+        # Determine relevant properties per object type for FAST scan
+        obj_properties: dict[str, list[str]] = {}
+        keys = []
+        for obj in objects[:self.config.scan_max_objects_per_device]:
+            obj_type = obj.split(",")[0]
+            if obj_type in ("analog-input", "analog-output", "analog-value"):
+                props = ["object-name", "present-value", "units"]
+            elif obj_type in ("binary-input", "binary-output", "binary-value", "multi-state-input", "multi-state-output", "multi-state-value"):
+                props = ["object-name", "present-value"]
+            else:
+                props = ["object-name"]
+
+            obj_properties[obj] = props
+            for prop in props:
+                keys.append((obj, prop))
+
         pending = {}
-        async for (object_id, property_id), result in self.reader.many(device.address, keys):
-            results = pending.setdefault(object_id, {})
-            results[property_id] = result
-            if len(results) < len(properties):
-                continue
-            # Persist each completed object immediately, even in individual-read
-            # fallback, so cancelling later preserves the work already collected.
-            named, valued, unit = (results[prop] for prop in properties)
+
+        def _persist_point(object_id: str, results: dict[str, ReadResult]):
+            named = results.get("object-name", ReadResult(error="no result returned"))
+            valued = results.get("present-value", ReadResult(error="no result returned"))
+            unit = results.get("units", ReadResult(error="no result returned"))
+
             point_name = None if named.error else str(named.value)
             value_number, value_text = (None, None) if valued.error else serialise_value(valued.value)
             units = None if unit.error else str(unit.value)
-            errors = [f"{label} {res.error}" for label, res in (("name", named), ("value", valued))
-                      if res.error]
-            # Missing units is normal on many binary and non-value objects.
+
+            # For FAST scan mapping, ignore errors for properties we did not request
+            # e.g., missing "units" on a binary-input.
+            expected = set(obj_properties.get(object_id, []))
+
+            errors = []
+            for label, res, prop_id in (("name", named, "object-name"), ("value", valued, "present-value"), ("units", unit, "units")):
+                if res.error and prop_id in expected:
+                    errors.append(f"{label} {res.error}")
+
             self.store.scan_point(
                 scan_id, device.instance, object_id, point_name, value_text,
                 value_number, units, "; ".join(errors) or None,
             )
+
+        async for (object_id, property_id), result in self.reader.many(device.address, keys):
+            results = pending.setdefault(object_id, {})
+            results[property_id] = result
+
+            expected_props = set(obj_properties[object_id])
+
+            if expected_props <= set(results.keys()):
+                # Persist each completed object immediately, even in individual-read
+                # fallback, so cancelling later preserves the work already collected.
+                _persist_point(object_id, results)
+                count += 1
+                del pending[object_id]
+
+        # Defensive fallback: Persist any objects that did not get all their properties returned.
+        for object_id, results in pending.items():
+            _persist_point(object_id, results)
             count += 1
-            del pending[object_id]
+
         return count

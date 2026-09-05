@@ -81,6 +81,8 @@ class ReadScheduler:
             result = ReadResult(error=f"{type(exc).__name__}: {exc}"[:1000])
         if result.error:
             self.property_errors += 1
+        else:
+            self.successful_properties += 1
         return result
 
     async def many(self, address: str, keys: list[ReadKey]) -> AsyncIterator[tuple[ReadKey, ReadResult]]:
@@ -103,6 +105,8 @@ class ReadScheduler:
 
             if len(chunk) == 1:
                 position += len(chunk)
+                if can_batch:
+                    self.individual_fallback_reads += 1
                 yield chunk[0], await self.one(address, chunk[0])
                 continue
 
@@ -120,13 +124,31 @@ class ReadScheduler:
                 exc_str = str(exc).lower()
                 exc_name = type(exc).__name__.lower()
 
-                is_unsupported = "unsupported" in exc_str or "unrecognized" in exc_str
+                # Retrieve the structured reason if available (e.g. from bacpypes3.apdu.ErrorRejectAbortNack)
+                reason = getattr(exc, "apduAbortRejectReason", getattr(exc, "reason", None))
+                if reason is not None:
+                    # Clean up the enum string (e.g. "buffer-overflow" -> "bufferoverflow")
+                    reason_str = str(reason).lower().replace("-", "")
+                else:
+                    reason_str = ""
+
+                is_unsupported = "unsupported" in exc_str or "unrecognized" in exc_str or "unrecognizedservice" in reason_str
                 is_timeout = isinstance(exc, TimeoutError) or "timeout" in exc_name or "timeout" in exc_str
-                is_size_error = any(phrase in exc_str for phrase in [
-                    "segmentation not supported", "buffer overflow",
-                    "apdu too long", "application exceeded reply time",
-                    "too many arguments", "reject: too large"
-                ])
+
+                size_reasons = {
+                    "segmentationnotsupported", "bufferoverflow",
+                    "apdutoolong", "applicationexceededreplytime",
+                    "toomanyarguments"
+                }
+
+                is_size_error = (
+                    any(r in reason_str for r in size_reasons) or
+                    any(phrase in exc_str for phrase in [
+                        "segmentation not supported", "buffer overflow",
+                        "apdu too long", "application exceeded reply time",
+                        "too many arguments", "reject: too large"
+                    ])
+                )
 
                 if is_unsupported:
                     # RPM is unsupported: cool down for a very long time, fall back individually
@@ -176,6 +198,8 @@ class ReadScheduler:
                     if result.error:
                         self.property_errors += 1
                     else:
+                        # successful_properties is correctly counted in `one()` if it falls back,
+                        # so we also correctly count it here if it's successfully part of an RPM batch
                         self.successful_properties += 1
                     yield key, result
 

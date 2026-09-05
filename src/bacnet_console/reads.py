@@ -32,6 +32,10 @@ class ReadScheduler:
         self.request_errors = 0
         self.property_errors = 0
         self.request_seconds = 0.0
+        self.successful_properties = 0
+        self.rpm_attempts = 0
+        self.rpm_failures = 0
+        self.individual_fallback_reads = 0
 
     def _state(self, address: str) -> DevicePacing:
         return self.devices.setdefault(address, DevicePacing(
@@ -84,39 +88,97 @@ class ReadScheduler:
         state = self._state(address)
         position = 0
         batch_reader = getattr(self.client, "read_multiple", None)
+        is_retrying_chunk = False
         while position < len(keys):
-            can_batch = (callable(batch_reader) and self.config.rpm_batch_size > 1
-                         and time.monotonic() >= state.cooldown_until)
-            size = max(2, state.size) if can_batch else 1
-            chunk = keys[position:position + min(size, self.config.rpm_batch_size)]
-            position += len(chunk)
+            can_batch = (callable(batch_reader) and self.config.rpm_batch_size > 1)
+            # If we're not allowed to batch because of cooldown, force size=1
+            # UNLESS we are actively retrying a chunk that was rejected for size limits
+            if is_retrying_chunk:
+                size = min(max(2, state.size), self.config.rpm_batch_size)
+            else:
+                size = min(max(2, state.size), self.config.rpm_batch_size) if (can_batch and time.monotonic() >= state.cooldown_until) else 1
+
+            is_retrying_chunk = False
+            chunk = keys[position:position + size]
+
             if len(chunk) == 1:
+                position += len(chunk)
                 yield chunk[0], await self.one(address, chunk[0])
                 continue
+
+            self.rpm_attempts += 1
             try:
                 values = await self._request(address, lambda: batch_reader(address, chunk))
                 if not isinstance(values, dict):
                     raise ValueError("invalid batch response mapping")
-            except READ_ERRORS:
+            except READ_ERRORS as exc:
+                self.rpm_failures += 1
                 state.failures += 1
                 state.size = max(1, state.size // 2)
                 state.successes = 0
-                # Remember rejection for this address; don't retry RPM on every
-                # batch. Re-probe after bounded exponential cooldown.
-                state.cooldown_until = time.monotonic() + min(300, 30 * 2 ** min(state.failures - 1, 4))
-                for key in chunk:
-                    yield key, await self.one(address, key)
+
+                exc_str = str(exc).lower()
+                exc_name = type(exc).__name__.lower()
+
+                is_unsupported = "unsupported" in exc_str or "unrecognized" in exc_str
+                is_timeout = isinstance(exc, TimeoutError) or "timeout" in exc_name or "timeout" in exc_str
+                is_size_error = any(phrase in exc_str for phrase in [
+                    "segmentation not supported", "buffer overflow",
+                    "apdu too long", "application exceeded reply time",
+                    "too many arguments", "reject: too large"
+                ])
+
+                if is_unsupported:
+                    # RPM is unsupported: cool down for a very long time, fall back individually
+                    state.cooldown_until = time.monotonic() + 3600
+                    position += len(chunk) # advance position
+                    for key in chunk:
+                        self.individual_fallback_reads += 1
+                        yield key, await self.one(address, key)
+                elif is_timeout:
+                    # Timeout: cool down moderately, do NOT fall back to individual reads (which would just timeout more)
+                    state.cooldown_until = time.monotonic() + min(300, 30 * 2 ** min(state.failures - 1, 4))
+                    position += len(chunk) # skip this chunk entirely and yield errors
+                    for key in chunk:
+                        yield key, ReadResult(error=f"RPM timeout skipped: {type(exc).__name__}: {exc}")
+                elif is_size_error:
+                    # Size-related Reject/Abort (oversized or malformed): do NOT fall back individually immediately,
+                    # and do NOT apply a cooldown. Allow the next loop iteration to retry the exact same chunk
+                    # with the halved size.
+                    # We bound this by checking if we have reached size=1. If so, apply a brief cooldown and fall back.
+                    if state.size <= 1:
+                        state.cooldown_until = time.monotonic() + min(300, 30 * 2 ** min(state.failures - 1, 4))
+                        position += len(chunk)
+                        for key in chunk:
+                            self.individual_fallback_reads += 1
+                            yield key, await self.one(address, key)
+                    else:
+                        # Allow immediate retry at smaller size, no position advance, no cooldown
+                        is_retrying_chunk = True
+                else:
+                    # Other Reject/Abort: cool down and fall back
+                    state.cooldown_until = time.monotonic() + min(300, 30 * 2 ** min(state.failures - 1, 4))
+                    position += len(chunk) # advance position
+                    for key in chunk:
+                        self.individual_fallback_reads += 1
+                        yield key, await self.one(address, key)
                 continue
+
+            position += len(chunk) # Successfully processed (or partially missing), advance position
             missing = False
             for key in chunk:
                 if key not in values:
                     missing = True
+                    self.individual_fallback_reads += 1
                     yield key, await self.one(address, key)
                 else:
                     result = read_result(values[key])
                     if result.error:
                         self.property_errors += 1
+                    else:
+                        self.successful_properties += 1
                     yield key, result
+
             if missing:
                 state.successes = 0
                 state.size = max(1, state.size // 2)

@@ -182,3 +182,53 @@ async def test_rpm_reject_bounded_halving(config_file, monkeypatch):
     # All values should be correctly fetched
     for result in results:
         assert result.value == 71
+
+
+@pytest.mark.asyncio
+async def test_rpm_abort_bounded_halving(config_file, monkeypatch):
+    import time
+    from types import SimpleNamespace
+    clock = SimpleNamespace(now=0.)
+    async def sleep(delay): clock.now += delay
+    monkeypatch.setattr('bacnet_console.reads.time', SimpleNamespace(monotonic=lambda: clock.now))
+    monkeypatch.setattr('bacnet_console.reads.asyncio', SimpleNamespace(Lock=asyncio.Lock, timeout=asyncio.timeout, sleep=sleep))
+
+    from bacpypes3.apdu import AbortPDU
+
+    class BoundedAbortClient(BatchClient):
+        def __init__(self):
+            super().__init__()
+            self.read_calls = 0
+
+        async def read_multiple(self, address, keys):
+            self.batches.append(list(keys))
+            if len(keys) > 2: # simulate oversized reject for any batch > 2
+                raise AbortPDU(True, 1, 4) # 4 is segmentationNotSupported
+            return {key: ReadResult(value=71) for key in keys}
+
+        async def read(self, address, obj, prop):
+            self.read_calls += 1
+            return 72
+
+    from dataclasses import replace
+    client = BoundedAbortClient()
+    config = load_config(config_file)
+    config = replace(config, rpm_batch_size=8)
+    reader = ReadScheduler(client, config)
+
+    state = reader._state('192.0.2.1')
+    state.size = 8
+
+    keys = [(f'analog-input,{i}', 'present-value') for i in range(8)]
+    results = [result async for _, result in reader.many('192.0.2.1', keys)]
+
+    assert len(results) == 8
+
+    attempted_lengths = [len(b) for b in client.batches]
+    assert attempted_lengths == [8, 4, 2, 2, 4, 2, 2]
+
+    assert client.read_calls == 0
+    assert reader.individual_fallback_reads == 0
+
+    for result in results:
+        assert result.value == 71

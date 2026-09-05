@@ -105,7 +105,8 @@ class ReadScheduler:
 
             if len(chunk) == 1:
                 position += len(chunk)
-                if can_batch:
+                # Count as fallback only if we're forced to size=1 due to cooldown
+                if can_batch and time.monotonic() < state.cooldown_until:
                     self.individual_fallback_reads += 1
                 yield chunk[0], await self.one(address, chunk[0])
                 continue

@@ -1,219 +1,547 @@
-# BACnet read-only collector and LAN console
+# BACnet Collector
 
-This project is a Raspberry Pi OS service for an approved, single-building
-BACnet/IP pilot. It trends an explicit device/point allowlist, stores readings
-and errors in SQLite, and presents a local LAN dashboard with collector health,
-approved point health, discovery results, and scan history.
+A **read-only BACnet/IP monitoring tool** designed to run on a Raspberry Pi.
 
-It has no BACnet write calls, control logic, command priorities, schedules, or
-controller-configuration features. Ordinary BACnet reads need no credentials.
+It lets you:
 
-> Connect this only with written BAS-owner approval. Discovery and reads still
-> create network/controller load. This source and its tests were developed
-> offline; no Raspberry Pi, BAS, or networked device was contacted.
+- See BACnet devices and points on a building network
+- Choose which points you want to monitor
+- Save temperature, status, and other BACnet values over time
+- View everything from a simple web dashboard.
+- Export collected information when needed
 
-## Safety model
+## What does this actually do?
 
-- The normal collector receives a capability-limited client with `read` and
-  `read_multiple` only.
-  It cannot initiate discovery.
-- Discovery exists in a separate scan component and runs only after an operator
-  submits the dashboard's **Run operator scan now** form.
-- Service startup never schedules or runs a scan. There is no scan timer.
-- A scan sends Who-Is plus read-only object/property requests. It never approves,
-  modifies, or configures a BAS device.
-- Scan results are observational. Devices and points become approved only by an
-  administrator editing the local YAML allowlist and restarting the service.
-- The scan form uses an unguessable per-process token to block cross-site form
-  submissions. This is not user authentication; put the BAS interface and Pi on
-  an access-controlled LAN/VLAN and use host firewall policy as required.
-- The web server binds to the RFC1918 address selected by `network.bind`; `auto`
-  resolves the active default-route IPv4 interface each time the service starts.
-  `0.0.0.0`, public addresses, loopback, and a mismatched dashboard host are
-  rejected before startup.
+Think of this program as a **BACnet observer**.
 
-Any future BACnet control feature must be a separate project, process, service
-account, configuration, and authorization review. Do not extend these facades
-with mutation methods.
+It can:
 
-## Operation
+**LOOK → READ → RECORD → DISPLAY**
 
-### Initial discovery-only commissioning
+It cannot:
 
-`devices: []` is valid. With an empty allowlist the collector heartbeat and web
-console run, but no trend reads occur. No scan runs automatically. An authorized
-operator can press **Run operator scan now** to perform one bounded scan. While
-a scan is active, that same in-page button changes to **Stop scan**. It cancels
-the operator task without leaving the dashboard and preserves partial results
-as an interrupted scan. Operator stops are labeled **stopped** in the live panel,
-with the reason saved as `scan stopped by operator`. For compatibility with
-existing databases, the stored status remains `failed`; the error distinguishes
-operator stops, shutdowns, and actual failures. Counts come from committed rows,
-including points collected partway through a device.
+**CHANGE → COMMAND → OVERRIDE → CONTROL**
 
-The latest result shows discovered devices, their object-list points, read
-health, values when readable, and whether each item matches the approved YAML.
-Saved scans remain available until you explicitly delete them. There is no
-automatic scan-count retention limit. Export/back up important scans; deletions
-cannot be undone. Previously purged scans cannot be recovered by this update.
+The collector does not write BACnet values, change setpoints, modify schedules, or configure controllers.
 
-The scanner defaults to at most 50 devices and 200 objects per device, with a
-250 ms minimum gap between read requests and a 30-minute total scan deadline.
-These limits are configurable under `scan` and `network`, but should be
-increased only with BAS-owner approval. If the deadline expires, the scan is
-marked failed with the partial counts preserved. A scan left running by a
-service restart is also marked failed automatically, so the dashboard cannot
-wait forever on an abandoned run. Devices that return no usable object list
-are recorded with an explicit error instead of an indefinite point wait.
+---
 
-### Approved collection
+# Basic workflow
 
-Add approved devices and points under `devices`. A device can have no points,
-which displays device health without trending. An address can be configured
-manually; otherwise a successful operator scan can resolve it locally. The
-collector never performs discovery to resolve an address on its own.
+```text
+BACnet Controllers
+        │
+        ▼
+   Raspberry Pi
+        │
+        ├── Reads approved points
+        │
+        ├── Saves history
+        │
+        └── Runs web dashboard
+                 │
+                 ▼
+          Phone / Laptop
+```
 
-The default trend interval is **300 seconds (five minutes)**. This is a sensible,
-deliberately conservative starting point for general building temperatures and
-status telemetry. Faster operational needs should be reviewed with the BAS owner;
-configuration rejects intervals below 60 seconds. Requests run sequentially with
-a configurable 250 ms minimum gap, including individual-read fallback.
+Normally you will:
 
-### Adaptive read batching
+1. Install the collector on a Raspberry Pi.
+2. Connect the Pi to the approved BACnet/IP network.
+3. Open the dashboard.
+4. Run a scan to see what BACnet devices are available.
+5. Choose the devices and points you want to monitor.
+6. Add those points to `config.yaml`.
+7. Let the Pi collect them automatically.
 
-Operator scans and approved collection share one read scheduler. It starts with
-two property references per ReadPropertyMultiple request and doubles the batch
-after two complete responses, up to `network.read_multiple_batch_size` (default
-20). This counts properties, not objects: a scanned object's name, value, and
-units consume three references. Set the limit to 1 to use individual reads only.
+---
 
-There is only one read request in flight. Slow responses reduce the batch size
-and increase the gap. A failed batch falls back to paced individual reads and
-puts batching for that address on a 30-second cooldown, increasing to at most
-five minutes after repeated failures. Missing response entries are individually
-retried; explicit property errors are saved as errors, not successful values.
-Completed scan points are saved as they arrive, including during fallback.
+# Dashboard
 
-Request timing and error counters are kept in memory, without additional network
-requests; they are not yet displayed in the dashboard. These safeguards do not
-establish a controller's safe throughput. Actual ECY performance still requires
-an approved on-site check; no fixed objects-per-second rate is guaranteed.
+The dashboard runs on your local network.
 
-## Configuration
+By default:
 
-Copy `config.example.yaml`. Use `auto` for the default-route interface, or specify
-the address/prefix of the approved BAS interface explicitly. `dashboard.host`
-must resolve to the same host address. On a dual-connected Wi-Fi/Ethernet Pi,
-the default route is not necessarily the BAS-facing interface:
+```text
+http://PI_ADDRESS:8080
+```
+
+For example:
+
+```text
+http://192.168.1.50:8080
+```
+
+The dashboard can show:
+
+- Collector status
+- BACnet devices
+- Point values
+- Last successful readings
+- Communication errors
+- Scan results
+- Previous scans
+- Point health
+
+The dashboard also allows you to manually start and stop BACnet scans.
+
+A scan **does not run automatically when the Pi starts**.
+
+---
+
+# First-time setup
+
+You can start with no configured BACnet devices:
 
 ```yaml
-network:
-  bind: auto
-dashboard:
-  host: auto
-  port: 8080
 devices: []
 ```
 
-Validate without opening a BACnet socket:
+The collector and dashboard will still run.
 
-```sh
-bacnet-console --config ./config.yaml --check-config
+This is useful when first connecting to a building because you can open the dashboard and manually run a discovery scan.
+
+The scan will show what it finds without automatically adding anything to your permanent monitoring configuration.
+
+After reviewing the results, add only the devices and points you actually want to monitor.
+
+---
+
+# Example point
+
+A configured device might look like this:
+
+```yaml
+devices:
+  - name: Example Air Handler
+    instance: 1001
+    address: 192.168.50.41
+
+    points:
+      - name: Supply Air Temperature
+        object: analog-input,1
+        property: present-value
+        units: °F
 ```
 
-Point identifiers use `type,instance`, such as `analog-input,1`; properties use
-hyphenated BACnet names such as `present-value`. Do not place passwords or BAS
-credentials in this file.
+This tells the collector:
 
-## Raspberry Pi resources
+```text
+Device:
+Example Air Handler
 
-The software is model-neutral across Raspberry Pi OS Bookworm devices with
-Python 3.11 and a supported wired Ethernet interface (built in or approved USB):
+BACnet Device Instance:
+1001
 
-- Minimum small pilot: 512 MB RAM, one CPU core, and 1 GB free persistent space.
-- Recommended: 1 GB+ RAM, two cores, high-endurance SD/SSD, reliable power/UPS.
-- Budget about 200 MB for the environment plus SQLite growth. At 100 points and
-  five-minute polling, there are 28,800 readings/day. Measure actual growth and
-  plan storage accordingly. The `retention_days` setting and pruning helper
-  currently exist, but automatic pruning is not scheduled; do not rely on them
-  to cap disk usage. Saved scans are never automatically pruned.
+IP:
+192.168.50.41
 
-## Installation staging
+Watch:
+Analog Input 1
 
-The included systemd unit runs as an unprivileged `bacnetconsole` account,
-restarts after failure/reboot, and allows writes only to `/var/lib/bacnet-console`.
-Stage and validate the source before any approved deployment window:
+Read:
+Present Value
+
+Display as:
+Supply Air Temperature
+```
+
+You can add additional points under the same device.
+
+---
+
+# How often are points collected?
+
+The default interval is:
+
+```text
+300 seconds
+```
+
+or:
+
+```text
+5 minutes
+```
+
+This works well for things such as:
+
+- Room temperature
+- Supply air temperature
+- Return air temperature
+- Humidity
+- Equipment status
+- Building trends
+
+The minimum allowed polling interval is **60 seconds**.
+
+You can change the interval in:
+
+```yaml
+poll_interval_seconds: 300
+```
+
+---
+
+# Installation
+
+The software requires:
+
+```text
+Python 3.11+
+```
+
+From the project directory:
 
 ```sh
 python3 -m venv .venv
 .venv/bin/pip install .
+```
+
+Copy the example configuration:
+
+```sh
+cp config.example.yaml config.yaml
+```
+
+Check the configuration before connecting:
+
+```sh
 .venv/bin/bacnet-console --config ./config.yaml --check-config
 ```
 
-The service file expects the application at `/opt/bacnet-console`, configuration
-at `/etc/bacnet-console/config.yaml`, and data at `/var/lib/bacnet-console`.
-Installation, interface configuration, firewall changes, and service startup are
-site deployment actions and are intentionally not automated by this repository.
+If everything is correct, you should see:
 
-## Dashboard and health
+```text
+configuration is valid
+```
 
-With `auto`, DHCP address changes are picked up whenever the service starts. The
-configured URL is `http://LAN_ADDRESS:8080/`. Changing networks while the process
-is running still requires a restart; `auto` is not a live interface watcher. It shows:
+Then run the collector:
 
-- collector start, heartbeat, completed cycles, and fatal error state;
-- approved device addresses, last-seen timestamps, point values and failures;
-- latest discovered device/object results and read errors;
-- scan requester address, timestamps, status, counts, and failures.
+```sh
+.venv/bin/bacnet-console --config ./config.yaml
+```
 
-The page markup, CSS, and scan-progress JavaScript are separate files under
-`templates/` and `static/`. The dashboard reads them on each request with
-browser caching disabled, so presentation edits take effect after a refresh
-without restarting the Python service. Timestamps are shown in compact UTC
-form with the original ISO value retained on hover.
-Installed wheels also include fallback assets under the environment's
-`share/bacnet-console` directory, so launching from a different working directory
-does not lose the dashboard. A source directory containing `templates/dashboard.html`
-takes precedence for live editing.
+---
 
-The live panel uses `GET /api/scan/status`, returning only the latest scan rather
-than every saved scan's points. It polls once per second during scans and every
-five seconds while idle, so scans started in another tab become visible. Requests
-have a ten-second browser timeout, buttons reject duplicate pending submissions,
-and a failed status request leaves previously shown data on screen. Completed or
-stopped scans refresh the saved-results sections without page navigation. Long
-tables scroll within their containers; on narrow screens live status appears first.
+# Basic configuration
 
-`GET /api/status` returns the same data as JSON. The dashboard displays every
-saved discovered scan point in a scrollable device/point view. `POST
-/api/points.csv` downloads the saved scan-point list, and `GET /healthz` proves
-the HTTP process is responding. Use the collector heartbeat and point timestamps
-for end-to-end health. `POST /api/rescan` starts a read-only scan and `POST /api/scan/rename`
-changes only a local scan-history label. The dashboard also offers local
-deletion of saved scans, removal of saved scan points, and disabling of approved
-points. These actions require the token served in the dashboard form and are
-recorded in the audit log. Other mutation methods are rejected; none of these
-local console actions can issue a BACnet write.
-Removal and deletion buttons request confirmation and handle errors in-page.
-Active scans and their points cannot be deleted. Disabling an approved point
-stops subsequent trend reads and persists across restarts (an already-started
-read may finish). The YAML alone does not re-enable a disabled point; a dedicated
-restore control is not implemented yet. Saved-scan point removal does not disable
-an independently configured trend point. CSV text starting with spreadsheet
-formula markers is prefixed with an apostrophe for safe spreadsheet opening.
+A simple starting configuration looks like this:
 
-## Persistence and offline verification
+```yaml
+network:
+  bind: auto
 
-SQLite uses WAL mode and `synchronous=FULL`; systemd handles automatic restart.
-The database retains last-known point/device health through power loss. Stable
-power and high-endurance storage are still recommended.
+poll_interval_seconds: 300
 
-Tests use fake BACnet clients, the installed BACpypes request parser with a mocked
-transport, temporary databases, and loopback HTTP only. They never open a BACnet
-socket:
+dashboard:
+  host: auto
+  port: 8080
+
+devices: []
+```
+
+Using:
+
+```yaml
+bind: auto
+```
+
+tells the program to use the Pi's active private network interface.
+
+For a permanent installation, you may prefer to explicitly configure the BACnet-facing interface.
+
+---
+
+# Where is the data stored?
+
+Readings and scan information are stored locally in a SQLite database.
+
+The normal service installation uses:
+
+```text
+/var/lib/bacnet-console/console.sqlite3
+```
+
+This allows the collector to keep historical information through restarts.
+
+For long-term installations, use a reliable SD card or SSD and occasionally back up important data.
+
+---
+
+# Raspberry Pi requirements
+
+The collector is lightweight.
+
+For a small installation:
+
+```text
+512 MB RAM
+1 CPU core
+1 GB free storage
+```
+
+Recommended:
+
+```text
+1 GB+ RAM
+2+ CPU cores
+High-endurance SD card or SSD
+Reliable power supply
+```
+
+A normal Raspberry Pi should have no trouble running it.
+
+---
+
+# Important: this project is read-only
+
+The BACnet portion of this project is intentionally limited to reading information.
+
+It does **not** contain BACnet commands for:
+
+- Changing setpoints
+- Overriding outputs
+- Changing schedules
+- Writing properties
+- Configuring controllers
+- Changing BACnet priorities
+
+If control functionality is ever added, it should be treated as a separate project with separate authorization and safety review.
+
+---
+
+# Network safety
+
+Only connect the collector to a BAS network where you have permission to do so.
+
+BACnet reads are normally lightweight, but discovery and large numbers of requests still create network and controller traffic.
+
+The program includes limits intended to avoid aggressive scanning.
+
+The dashboard should remain on a trusted local network or VLAN rather than being exposed directly to the internet.
+
+---
+
+# Technical notes
+
+The sections below describe how the collector behaves internally. Most users do not need to understand these details to operate it.
+
+## BACnet scanning
+
+Scans only happen when an operator requests one from the dashboard.
+
+The default limits are:
+
+```yaml
+scan:
+  max_duration_seconds: 1800
+  max_devices: 50
+  max_objects_per_device: 200
+```
+
+The default maximum scan duration is therefore:
+
+```text
+30 minutes
+```
+
+A scan can also be manually stopped from the dashboard.
+
+Partial results are preserved when possible.
+
+Devices discovered during a scan are **not automatically approved for monitoring**.
+
+They must still be added to the YAML configuration.
+
+---
+
+## BACnet request pacing
+
+The collector deliberately spaces BACnet requests.
+
+Default:
+
+```yaml
+network:
+  inter_request_delay_seconds: 0.25
+```
+
+That is a minimum gap of:
+
+```text
+250 ms
+```
+
+between requests.
+
+Only one read request is active at a time.
+
+This reduces the chance of overwhelming slower BACnet controllers.
+
+---
+
+## ReadPropertyMultiple
+
+The collector supports BACnet `ReadPropertyMultiple` to reduce unnecessary network traffic.
+
+It starts with small requests and gradually increases the number of properties requested together when the controller responds reliably.
+
+Default maximum:
+
+```yaml
+read_multiple_batch_size: 20
+```
+
+If a controller has trouble with larger requests, the collector automatically reduces the batch size.
+
+If batching fails, it falls back to individual property reads.
+
+Setting:
+
+```yaml
+read_multiple_batch_size: 1
+```
+
+effectively disables batching.
+
+---
+
+## Timeouts and slow controllers
+
+The default BACnet request timeout is:
+
+```yaml
+request_timeout_seconds: 5
+```
+
+Controllers that respond slowly or return errors cause the collector to reduce request batching and slow down requests.
+
+Repeated failures create progressively longer cooldown periods.
+
+These protections help the collector behave politely on slower BAS networks.
+
+---
+
+## Storage
+
+SQLite runs using WAL mode and:
+
+```text
+synchronous=FULL
+```
+
+to improve resilience against unexpected shutdowns.
+
+The configuration contains:
+
+```yaml
+retention_days: 90
+```
+
+but automatic database pruning is currently **not scheduled**.
+
+Do not assume the database will automatically remain below a particular size.
+
+Saved discovery scans are also not automatically deleted.
+
+---
+
+## Dashboard API
+
+The local dashboard uses several HTTP endpoints internally.
+
+Examples include:
+
+```text
+GET  /api/status
+GET  /api/scan/status
+GET  /healthz
+
+POST /api/rescan
+POST /api/points.csv
+POST /api/scan/rename
+```
+
+These are primarily used by the dashboard itself.
+
+The dashboard periodically requests scan status so a scan started from another browser tab can still appear live.
+
+---
+
+## Dashboard security
+
+The dashboard uses a temporary token to help prevent unwanted form submissions.
+
+This is **not a replacement for user authentication**.
+
+The intended protection is running the Pi and BACnet interface on an access-controlled local network or VLAN.
+
+The application also rejects public, loopback, wildcard, and mismatched network bindings where appropriate.
+
+---
+
+## systemd installation
+
+The included systemd configuration expects:
+
+```text
+Application:
+/opt/bacnet-console
+
+Configuration:
+/etc/bacnet-console/config.yaml
+
+Database/data:
+/var/lib/bacnet-console
+```
+
+The service runs as an unprivileged:
+
+```text
+bacnetconsole
+```
+
+user and can automatically restart after a failure or reboot.
+
+Network configuration, firewall configuration, and deployment are intentionally left as site-specific installation tasks.
+
+---
+
+# Testing
+
+Development tests do not require a real BAS.
+
+They use simulated BACnet clients, temporary databases, and local HTTP connections.
+
+Run the test suite with:
 
 ```sh
 python3 -m venv .venv
 .venv/bin/pip install -e '.[test]'
 .venv/bin/pytest
 ```
+
+---
+
+# Summary
+
+For normal use, the important part is:
+
+```text
+Install it
+    ↓
+Open dashboard
+    ↓
+Scan BACnet network
+    ↓
+Find the equipment you care about
+    ↓
+Add approved points to config.yaml
+    ↓
+Restart collector
+    ↓
+Pi trends the points automatically
+```
+
+Everything below that workflow is mostly implementation detail and safety protection.
